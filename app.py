@@ -324,54 +324,69 @@ if user_input:
             "You can also use the helpline links in the sidebar."
         )
 
+            else:
         with st.chat_message("assistant"):
-            st.error(reply)
-    else:
-        with st.chat_message("assistant"):
-            with st.spinner("Listening…"):
-                try:
-                    contents = []
+            reply_placeholder = st.empty()
+            reply = ""
 
-                    for message in st.session_state.messages:
-                        role = "model" if message["role"] == "assistant" else "user"
-                        contents.append(
-                            types.Content(
-                                role=role,
-                                parts=[
-                                    types.Part.from_text(text=message["content"])
-                                ],
-                            )
-                        )
+            try:
+                contents = []
 
-reply_placeholder = st.empty()
-reply = ""
-
-stream = gemini_client.models.generate_content_stream(
-    model="gemini-4-hydrogen",
-    contents=contents,
-    config=types.GenerateContentConfig(
-        system_instruction=SYSTEM_PROMPT,
-        temperature=0.7,
-        max_output_tokens=300,
-    ),
-)
-
-for chunk in stream:
-    if chunk.text:
-        reply += chunk.text
-        reply_placeholder.markdown(reply + "▌")
-
-reply_placeholder.markdown(reply)
-
-                except Exception:
-                    reply = (
-                        "I’m here with you, but I’m having trouble responding "
-                        "right now. Please try again shortly."
+                # Keep only the most recent conversation messages.
+                for message in st.session_state.messages[-8:]:
+                    role = (
+                        "model"
+                        if message["role"] == "assistant"
+                        else "user"
                     )
-                    st.error(reply)
 
-    st.session_state.messages.append(
-        {"role": "assistant", "content": reply}
-    )
-    save_message(user_id, "assistant", reply)
-    st.rerun()
+                    contents.append(
+                        types.Content(
+                            role=role,
+                            parts=[
+                                types.Part.from_text(
+                                    text=message["content"]
+                                )
+                            ],
+                        )
+                    )
+
+                reply_placeholder.markdown("_Aura is listening…_")
+
+                stream = gemini_client.models.generate_content_stream(
+                    model="gemini-4-hydrogen",
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=SYSTEM_PROMPT,
+                        temperature=0.7,
+                        max_output_tokens=300,
+                    ),
+                )
+
+                for chunk in stream:
+                    if chunk.text:
+                        reply += chunk.text
+                        reply_placeholder.markdown(reply + " ▌")
+
+                if not reply.strip():
+                    reply = (
+                        "I couldn’t generate a reply just now. "
+                        "Please try again shortly."
+                    )
+
+                reply_placeholder.markdown(reply)
+
+            except Exception:
+                if reply.strip():
+                    reply += (
+                        "\n\n*The response was interrupted. "
+                        "Please try again shortly.*"
+                    )
+                else:
+                    reply = (
+                        "Aura is temporarily unavailable. "
+                        "Please try again shortly. "
+                        "Support resources remain available in the sidebar."
+                    )
+
+                reply_placeholder.markdown(reply)
