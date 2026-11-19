@@ -12,7 +12,8 @@ st.set_page_config(
 )
 
 FREE_MESSAGE_LIMIT = 15
-TODAY = date.today().isoformat()
+MAX_HISTORY_MESSAGES = 8
+MAX_OUTPUT_TOKENS = 300
 
 CRISIS_KEYWORDS = [
     "suicide",
@@ -25,55 +26,70 @@ CRISIS_KEYWORDS = [
 ]
 
 SYSTEM_PROMPT = """
-You are Aura, a compassionate, patient, non-judgmental listener.
+You are Aura, a warm, calm, compassionate, and non-judgmental listener.
 
 - Validate the person's feelings before offering perspective.
-- Do not rush to solve problems or use toxic positivity.
-- Be calm, respectful, inclusive, and culturally neutral.
 - Reply in the same language and tone the person uses.
+- Keep responses concise: usually 2 to 5 sentences.
+- Ask at most one gentle follow-up question.
 - Do not diagnose conditions, prescribe medication, or give medical advice.
 - Do not provide instructions for self-harm, violence, or illegal activity.
 - If someone may be in immediate danger, encourage them to contact local
-  emergency services or a trusted person, and avoid acting as a crisis service.
+  emergency services or a trusted person.
+- Do not claim to be a therapist, doctor, or crisis service.
 """
 
 
-def init_supabase():
-    try:
-        return create_client(
-            st.secrets["SUPABASE_URL"],
-            st.secrets["SUPABASE_KEY"],
-        )
-    except Exception:
-        return None
+@st.cache_resource
+def get_supabase_client():
+    return create_client(
+        st.secrets["SUPABASE_URL"],
+        st.secrets["SUPABASE_KEY"],
+    )
 
 
-supabase = init_supabase()
+@st.cache_resource
+def get_gemini_client():
+    return genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
+
+
+supabase = get_supabase_client()
+gemini_client = get_gemini_client()
 
 
 def render_auth_screen():
     st.title("🌱 SafeHaven")
-    st.caption("A quiet, judgment-free space for emotional support and active listening.")
+    st.caption(
+        "A quiet, judgment-free space for emotional support and active listening."
+    )
 
     login_tab, signup_tab = st.tabs(["Log In", "Create Account"])
 
     with login_tab:
         email = st.text_input("Email", key="login_email")
-        password = st.text_input("Password", type="password", key="login_password")
+        password = st.text_input(
+            "Password",
+            type="password",
+            key="login_password",
+        )
 
         if st.button("Log In", use_container_width=True):
-            if not supabase:
-                st.error("Database connection error. Check your Supabase secrets.")
-            else:
-                try:
-                    response = supabase.auth.sign_in_with_password(
-                        {"email": email, "password": password}
-                    )
-                    if response.user:
-                        st.session_state.user = response.user
-                        st.rerun()
-                except Exception:
-                    st.error("Login failed. Check your email and password.")
+            try:
+                response = supabase.auth.sign_in_with_password(
+                    {
+                        "email": email,
+                        "password": password,
+                    }
+                )
+
+                if response.user:
+                    st.session_state.user = response.user
+                    st.rerun()
+
+            except Exception:
+                st.error(
+                    "Login failed. Please check your email and password."
+                )
 
     with signup_tab:
         email = st.text_input("Email", key="signup_email")
@@ -84,38 +100,40 @@ def render_auth_screen():
         )
 
         if st.button("Create Account", use_container_width=True):
-            if not supabase:
-                st.error("Database connection error. Check your Supabase secrets.")
-            else:
-                try:
-                    response = supabase.auth.sign_up(
-                        {"email": email, "password": password}
-                    )
-                    if response.user:
-                        st.session_state.user = response.user
-                        st.rerun()
-                except Exception:
-                    st.error(
-                        "Sign-up failed. Try a different email or stronger password."
-                    )
+            try:
+                response = supabase.auth.sign_up(
+                    {
+                        "email": email,
+                        "password": password,
+                    }
+                )
+
+                if response.user:
+                    st.session_state.user = response.user
+                    st.rerun()
+
+            except Exception:
+                st.error(
+                    "Sign-up failed. Try a different email or a stronger password."
+                )
 
 
 def get_remaining_messages(user_id):
-    if not supabase:
-        return FREE_MESSAGE_LIMIT
+    today = date.today().isoformat()
 
     try:
         response = (
             supabase.table("user_daily_usage")
             .select("message_count")
             .eq("user_id", user_id)
-            .eq("usage_date", TODAY)
+            .eq("usage_date", today)
             .execute()
         )
 
         if response.data:
             used = response.data[0]["message_count"]
             return max(0, FREE_MESSAGE_LIMIT - used)
+
     except Exception:
         pass
 
@@ -123,39 +141,38 @@ def get_remaining_messages(user_id):
 
 
 def increment_usage(user_id):
-    if not supabase:
-        return
+    today = date.today().isoformat()
 
     try:
         response = (
             supabase.table("user_daily_usage")
             .select("message_count")
             .eq("user_id", user_id)
-            .eq("usage_date", TODAY)
+            .eq("usage_date", today)
             .execute()
         )
 
         if response.data:
             current_count = response.data[0]["message_count"]
+
             supabase.table("user_daily_usage").update(
                 {"message_count": current_count + 1}
-            ).eq("user_id", user_id).eq("usage_date", TODAY).execute()
+            ).eq("user_id", user_id).eq("usage_date", today).execute()
+
         else:
             supabase.table("user_daily_usage").insert(
                 {
                     "user_id": user_id,
-                    "usage_date": TODAY,
+                    "usage_date": today,
                     "message_count": 1,
                 }
             ).execute()
+
     except Exception:
         pass
 
 
 def save_message(user_id, role, content):
-    if not supabase:
-        return
-
     try:
         supabase.table("chat_messages").insert(
             {
@@ -164,14 +181,12 @@ def save_message(user_id, role, content):
                 "content": content,
             }
         ).execute()
+
     except Exception:
         pass
 
 
 def load_history(user_id):
-    if not supabase:
-        return []
-
     try:
         response = (
             supabase.table("chat_messages")
@@ -183,16 +198,119 @@ def load_history(user_id):
         )
 
         return [
-            {"role": row["role"], "content": row["content"]}
+            {
+                "role": row["role"],
+                "content": row["content"],
+            }
             for row in response.data
         ]
+
     except Exception:
         return []
 
 
 def detect_crisis(text):
-    normalized = text.lower()
-    return any(keyword in normalized for keyword in CRISIS_KEYWORDS)
+    normalized_text = text.lower()
+
+    return any(
+        keyword in normalized_text
+        for keyword in CRISIS_KEYWORDS
+    )
+
+
+def render_sidebar(user):
+    user_email = getattr(user, "email", "User")
+
+    with st.sidebar:
+        st.title("🌱 SafeHaven")
+        st.caption(f"Logged in as: **{user_email}**")
+
+        st.divider()
+
+        remaining = get_remaining_messages(user.id)
+        st.metric(
+            label="Messages remaining today",
+            value=remaining,
+        )
+
+        st.divider()
+        st.markdown("### 🆘 Need immediate help?")
+
+        st.write(
+            "If you are in immediate danger or experiencing a mental-health "
+            "crisis, contact local emergency services or a trusted person now."
+        )
+
+        st.link_button(
+            "Find a Helpline",
+            "https://findahelpline.com/",
+            use_container_width=True,
+        )
+
+        st.link_button(
+            "India: Tele-MANAS 14416",
+            "https://telemanas.mohfw.gov.in/",
+            use_container_width=True,
+        )
+
+        st.link_button(
+            "US & Canada: 988 Lifeline",
+            "https://988lifeline.org/",
+            use_container_width=True,
+        )
+
+        st.divider()
+
+        with st.expander("Terms and disclaimer"):
+            st.markdown(
+                """
+                SafeHaven is an AI-supported wellbeing tool, not a therapist,
+                doctor, crisis service, or emergency service.
+
+                It does not provide medical advice, diagnosis, or treatment.
+                If you are in immediate danger, contact local emergency
+                services or a professional helpline immediately.
+                """
+            )
+
+        if st.button("Log out", use_container_width=True):
+            try:
+                supabase.auth.sign_out()
+            except Exception:
+                pass
+
+            del st.session_state.user
+            st.rerun()
+
+
+def generate_aura_reply(conversation_history):
+    contents = []
+
+    for message in conversation_history:
+        role = "model" if message["role"] == "assistant" else "user"
+
+        contents.append(
+            types.Content(
+                role=role,
+                parts=[
+                    types.Part.from_text(
+                        text=message["content"]
+                    )
+                ],
+            )
+        )
+
+    stream = gemini_client.models.generate_content_stream(
+        model="gemini-4-hydrogen",
+        contents=contents,
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            temperature=0.7,
+            max_output_tokens=MAX_OUTPUT_TOKENS,
+        ),
+    )
+
+    return stream
 
 
 if "user" not in st.session_state:
@@ -202,69 +320,12 @@ if "user" not in st.session_state:
 user = st.session_state.user
 user_id = user.id
 
-with st.sidebar:
-    st.title("🌱 SafeHaven")
-
-    user_email = getattr(user, "email", "User")
-    st.caption(f"Logged in as: **{user_email}**")
-
-    st.divider()
-    remaining = get_remaining_messages(user_id)
-    st.metric("Messages remaining today", remaining)
-
-    st.divider()
-    st.markdown("### 🆘 Need immediate help?")
-    st.write(
-        "If you are in immediate danger or experiencing a mental-health crisis, "
-        "contact local emergency services or a trusted person now."
-    )
-
-    st.link_button(
-        "Find a Helpline",
-        "https://findahelpline.com/",
-        use_container_width=True,
-    )
-    st.link_button(
-        "India: Tele-MANAS 14416",
-        "https://telemanas.mohfw.gov.in/",
-        use_container_width=True,
-    )
-    st.link_button(
-        "US & Canada: 988 Lifeline",
-        "https://988lifeline.org/",
-        use_container_width=True,
-    )
-
-    st.divider()
-    with st.expander("Terms and disclaimer"):
-        st.markdown(
-            """
-            SafeHaven is an AI-supported wellbeing tool, not a therapist,
-            doctor, crisis service, or emergency service.
-
-            It does not provide medical advice, diagnosis, or treatment.
-            If you are in immediate danger, contact local emergency services
-            or a professional helpline immediately.
-            """
-        )
-
-    if st.button("Log out", use_container_width=True):
-        if supabase:
-            try:
-                supabase.auth.sign_out()
-            except Exception:
-                pass
-        del st.session_state.user
-        st.rerun()
+render_sidebar(user)
 
 st.title("🌱 SafeHaven")
-st.caption("Heard first. Respected always. Supported everywhere.")
-
-try:
-    gemini_client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
-except Exception:
-    st.error("Gemini API key is missing or invalid. Check Streamlit Secrets.")
-    st.stop()
+st.caption(
+    "Heard first. Respected always. Supported everywhere."
+)
 
 if "messages" not in st.session_state:
     st.session_state.messages = load_history(user_id)
@@ -274,17 +335,18 @@ for index, message in enumerate(st.session_state.messages):
         st.markdown(message["content"])
 
         if message["role"] == "assistant":
-            feedback_state_key = f"feedback_saved_{index}_{user_id}"
-
             feedback = st.feedback(
                 "thumbs",
                 key=f"feedback_{index}_{user_id}",
             )
 
+            feedback_saved_key = (
+                f"feedback_saved_{index}_{user_id}"
+            )
+
             if (
                 feedback is not None
-                and supabase
-                and feedback_state_key not in st.session_state
+                and feedback_saved_key not in st.session_state
             ):
                 try:
                     supabase.table("chat_feedback").insert(
@@ -293,15 +355,18 @@ for index, message in enumerate(st.session_state.messages):
                             "score": feedback,
                         }
                     ).execute()
-                    st.session_state[feedback_state_key] = True
+
+                    st.session_state[feedback_saved_key] = True
+
                 except Exception:
                     pass
 
-current_remaining = get_remaining_messages(user_id)
+remaining_messages = get_remaining_messages(user_id)
 
-if current_remaining <= 0:
+if remaining_messages <= 0:
     st.warning(
-        "You have reached today’s free message limit. Please return tomorrow."
+        "You have reached today’s free message limit. "
+        "Please return tomorrow to continue."
     )
     st.stop()
 
@@ -309,9 +374,14 @@ user_input = st.chat_input("Share what’s on your mind…")
 
 if user_input:
     increment_usage(user_id)
+
     st.session_state.messages.append(
-        {"role": "user", "content": user_input}
+        {
+            "role": "user",
+            "content": user_input,
+        }
     )
+
     save_message(user_id, "user", user_input)
 
     with st.chat_message("user"):
@@ -319,48 +389,24 @@ if user_input:
 
     if detect_crisis(user_input):
         reply = (
-            "I’m really sorry you’re carrying this. Your safety matters. "
+            "I’m really sorry you’re carrying this. Your safety matters.\n\n"
             "Please contact local emergency services or a trusted person now. "
             "You can also use the helpline links in the sidebar."
         )
 
-            else:
+        with st.chat_message("assistant"):
+            st.error(reply)
+
+    else:
         with st.chat_message("assistant"):
             reply_placeholder = st.empty()
             reply = ""
 
             try:
-                contents = []
-
-                # Keep only the most recent conversation messages.
-                for message in st.session_state.messages[-8:]:
-                    role = (
-                        "model"
-                        if message["role"] == "assistant"
-                        else "user"
-                    )
-
-                    contents.append(
-                        types.Content(
-                            role=role,
-                            parts=[
-                                types.Part.from_text(
-                                    text=message["content"]
-                                )
-                            ],
-                        )
-                    )
-
                 reply_placeholder.markdown("_Aura is listening…_")
 
-                stream = gemini_client.models.generate_content_stream(
-                    model="gemini-4-hydrogen",
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        system_instruction=SYSTEM_PROMPT,
-                        temperature=0.7,
-                        max_output_tokens=300,
-                    ),
+                stream = generate_aura_reply(
+                    st.session_state.messages[-MAX_HISTORY_MESSAGES:]
                 )
 
                 for chunk in stream:
@@ -370,8 +416,8 @@ if user_input:
 
                 if not reply.strip():
                     reply = (
-                        "I couldn’t generate a reply just now. "
-                        "Please try again shortly."
+                        "I’m here with you. Could you tell me a little more "
+                        "about what you’re experiencing?"
                     )
 
                 reply_placeholder.markdown(reply)
@@ -384,9 +430,19 @@ if user_input:
                     )
                 else:
                     reply = (
-                        "Aura is temporarily unavailable. "
-                        "Please try again shortly. "
-                        "Support resources remain available in the sidebar."
+                        "Aura is temporarily unavailable. Please try again "
+                        "shortly. Support resources remain available in the "
+                        "sidebar."
                     )
 
                 reply_placeholder.markdown(reply)
+
+    st.session_state.messages.append(
+        {
+            "role": "assistant",
+            "content": reply,
+        }
+    )
+
+    save_message(user_id, "assistant", reply)
+    st.rerun()
