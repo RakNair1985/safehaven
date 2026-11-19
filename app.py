@@ -343,21 +343,25 @@ if user_input:
                             )
                         )
 
-                    response = gemini_client.models.generate_content(
-                        model="gemini-4-hydrogen",
-                        contents=contents,
-                        config=types.GenerateContentConfig(
-                            system_instruction=SYSTEM_PROMPT,
-                            temperature=0.7,
-                        ),
-                    )
+reply_placeholder = st.empty()
+reply = ""
 
-                    reply = response.text or (
-                        "I’m here with you. Could you tell me a little more "
-                        "about what you’re experiencing?"
-                    )
+stream = gemini_client.models.generate_content_stream(
+    model="gemini-4-hydrogen",
+    contents=contents,
+    config=types.GenerateContentConfig(
+        system_instruction=SYSTEM_PROMPT,
+        temperature=0.7,
+        max_output_tokens=300,
+    ),
+)
 
-                    st.markdown(reply)
+for chunk in stream:
+    if chunk.text:
+        reply += chunk.text
+        reply_placeholder.markdown(reply + "▌")
+
+reply_placeholder.markdown(reply)
 
                 except Exception:
                     reply = (
