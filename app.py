@@ -1,6 +1,7 @@
-import openai
-from supabase import create_client
+from google import genai
+from google.genai import types
 import streamlit as st
+from supabase import create_client
 
 # Page Configuration
 st.set_page_config(
@@ -31,7 +32,7 @@ def init_supabase():
     url = st.secrets["SUPABASE_URL"]
     key = st.secrets["SUPABASE_KEY"]
     return create_client(url, key)
-  except Exception as e:
+  except Exception:
     return None
 
 
@@ -128,7 +129,7 @@ def get_remaining_messages(user_id):
   return FREE_MESSAGE_LIMIT
 
 
-# --- SIDEBAR: About, Crisis Support, Terms, and Controls ---
+# --- SIDEBAR ---
 with st.sidebar:
   st.title("🌱 SafeHaven")
   user_email = (
@@ -140,26 +141,23 @@ with st.sidebar:
 
   st.divider()
 
-  # Usage Tracker Display
   remaining_messages = get_remaining_messages(st.session_state.user.id)
   st.metric(label="Free Messages Remaining Today", value=remaining_messages)
 
-  # 💳 Monetization: Stripe Support Button
   st.markdown("### 💖 Support SafeHaven")
   st.write(
       "Unlock unlimited daily conversations and help keep this sanctuary"
       " running forever."
   )
-  stripe_link = st.secrets.get("STRIPE_PAYMENT_LINK", "https://stripe.com")
+  stripe_link = st.secrets.get("STRIPE_PAYMENT_LINK", "https://razorpay.com")
   st.link_button(
-      "⭐ Become a Supporter ($4/mo)",
+      "⭐ Become a Supporter",
       stripe_link,
       use_container_width=True,
   )
 
   st.divider()
 
-  # 🆘 Emergency & Crisis Support Section
   st.markdown("### 🆘 Need Immediate Help?")
   st.write(
       "If you are experiencing a mental health crisis, severe distress, or"
@@ -190,7 +188,6 @@ with st.sidebar:
 
   st.divider()
 
-  # Collapsible Terms & Medical Disclaimer Section
   with st.expander("⚖️ Terms & Medical Disclaimer"):
     st.markdown("""
         **1. AI Companion:** SafeHaven is an artificial intelligence-based companion, **not** a human therapist or medical professional.
@@ -218,18 +215,17 @@ st.caption(
     "A quiet, judgment-free global space. Heard first, respected always, supported everywhere."
 )
 
-# Configure OpenAI client
+# Configure Gemini client
 try:
-  api_key = st.secrets["OPENAI_API_KEY"]
-  client = openai.OpenAI(api_key=api_key)
-except Exception as e:
+  gemini_key = st.secrets["GEMINI_API_KEY"]
+  client = genai.Client(api_key=gemini_key)
+except Exception:
   st.error(
-      "OpenAI API key not found. Please add OPENAI_API_KEY to your Streamlit"
+      "Gemini API key not found. Please add GEMINI_API_KEY to your Streamlit"
       " Secrets."
   )
   st.stop()
 
-# The Refined Universal Ethical System Prompt
 SYSTEM_PROMPT = """
 You are "Aura," a deeply compassionate, patient, and completely non-judgmental human companion and listener. Your mission is to ensure no human ever feels completely alone.
 
@@ -250,33 +246,27 @@ You are "Aura," a deeply compassionate, patient, and completely non-judgmental h
 - Seamlessly detect and reply in the exact language, dialect, or tone the user writes in, ensuring global accessibility across all cultures.
 """
 
-if "system_prompt" not in st.session_state:
-  st.session_state.system_prompt = SYSTEM_PROMPT
-
 if "messages" not in st.session_state:
-  st.session_state.messages = [
-      {"role": "system", "content": st.session_state.system_prompt}
-  ]
+  st.session_state.messages = []
 
-# Display chat history (filtering out internal system prompt)
+# Display chat history
 for idx, message in enumerate(st.session_state.messages):
-  if message["role"] != "system":
-    with st.chat_message(message["role"]):
-      st.markdown(message["content"])
+  with st.chat_message(message["role"]):
+    st.markdown(message["content"])
 
-      if message["role"] == "assistant":
-        feedback_key = f"feedback_{idx}_{st.session_state.user.id}"
-        feedback = st.feedback("thumbs", key=feedback_key)
-        if feedback is not None and supabase:
-          try:
-            supabase.table("chat_feedback").insert({
-                "user_id": st.session_state.user.id,
-                "score": feedback,
-            }).execute()
-          except Exception:
-            pass
+    if message["role"] == "assistant":
+      feedback_key = f"feedback_{idx}_{st.session_state.user.id}"
+      feedback = st.feedback("thumbs", key=feedback_key)
+      if feedback is not None and supabase:
+        try:
+          supabase.table("chat_feedback").insert({
+              "user_id": st.session_state.user.id,
+              "score": feedback,
+          }).execute()
+        except Exception:
+          pass
 
-# --- CRISIS KEYWORD DETECTION SETUP ---
+# --- CRISIS KEYWORD DETECTION ---
 CRISIS_KEYWORDS = [
     "suicide",
     "kill myself",
@@ -293,7 +283,6 @@ def detect_crisis(text: str) -> bool:
   return any(keyword in text_lower for keyword in CRISIS_KEYWORDS)
 
 
-# Check remaining messages before rendering chat input
 current_remaining = get_remaining_messages(st.session_state.user.id)
 
 if current_remaining <= 0:
@@ -303,8 +292,8 @@ if current_remaining <= 0:
       " supporter!"
   )
   st.link_button(
-      "⭐ Unlock Unlimited Access ($4/mo)",
-      st.secrets.get("STRIPE_PAYMENT_LINK", "https://stripe.com"),
+      "⭐ Unlock Unlimited Access",
+      st.secrets.get("STRIPE_PAYMENT_LINK", "https://razorpay.com"),
       use_container_width=True,
   )
 else:
@@ -363,13 +352,29 @@ else:
       with st.chat_message("assistant"):
         with st.spinner("Listening..."):
           try:
-            response = client.chat.completions.create(
-                model="gpt-4o-mini", messages=st.session_state.messages
+            # Format conversation history for Gemini
+            gemini_contents = []
+            for msg in st.session_state.messages:
+              gemini_role = "model" if msg["role"] == "assistant" else "user"
+              gemini_contents.append(
+                  types.Content(
+                      role=gemini_role,
+                      parts=[types.Part.from_text(text=msg["content"])],
+                  )
+              )
+
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=gemini_contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    temperature=0.7,
+                ),
             )
-            reply = response.choices.message.content
+            reply = response.text
             st.markdown(reply)
-          except Exception:
-            reply = "I am here with you, but encountered a connection issue."
+          except Exception as e:
+            reply = f"I am here with you, but encountered a connection issue: {e}"
             st.error(reply)
 
     st.session_state.messages.append({"role": "assistant", "content": reply})
